@@ -314,16 +314,11 @@ def _resolve_media_path(db_dir, content, local_type, create_time_ts, chat_userna
             for entry in os.scandir(sub):
                 if not entry.is_file():
                     continue
-                name = entry.name
-                if name.endswith("_h.dat") and base_type == 3 and image_sizes.get("main"):
-                    pass
-                elif name.endswith("_h.dat"):
-                    continue
                 score = _score_image_candidate(entry, image_sizes) if base_type == 3 else 1
                 if score > best_score:
                     best = entry.path
                     best_score = score
-        if best and (base_type != 3 or best_score > 0):
+        if best:
             if base_type == 3:
                 best = _promote_image_variant(best)
             return best, True
@@ -395,7 +390,12 @@ def _image_size_hints(content):
 
 def _score_image_candidate(entry, image_sizes):
     if not image_sizes:
-        return 0
+        name = entry.name
+        if name.endswith("_h.dat"):
+            return 3
+        if not name.endswith("_t.dat"):
+            return 2
+        return 1
     try:
         size = entry.stat().st_size
     except OSError:
