@@ -11,12 +11,14 @@ from datetime import datetime
 import zstandard as zstd
 
 from .key_utils import key_path_variants
+from .media import decrypt_wechat_image
 
 _zstd_dctx = zstd.ZstdDecompressor()
 _XML_UNSAFE_RE = re.compile(r'<!DOCTYPE|<!ENTITY', re.IGNORECASE)
 _XML_PARSE_MAX_LEN = 20000
 _QUERY_LIMIT_MAX = 500
 _HISTORY_QUERY_BATCH_SIZE = 500
+_WECHAT_V2_DAT_OVERHEAD = 31
 
 # 消息类型过滤映射: 名称 -> (base_type,) 或 (base_type, sub_type)
 MSG_TYPE_FILTERS = {
@@ -140,6 +142,15 @@ def _parse_xml_root(content):
         return ET.fromstring(content)
     except ET.ParseError:
         return None
+
+
+def _extract_xml_content(content):
+    if not content:
+        return ''
+    idx = content.find('<?xml')
+    if idx < 0:
+        idx = content.find('<msg')
+    return content[idx:] if idx >= 0 else content
 
 
 def _parse_int(value, fallback=0):
@@ -283,22 +294,39 @@ def _resolve_media_path(db_dir, content, local_type, create_time_ts, chat_userna
             if os.path.isdir(candidate):
                 target_hash = h
 
-        # 限定搜索范围：目标目录或所有目录
-        search_dirs = [target_hash] if target_hash else [
+        all_dirs = [
             d for d in os.listdir(attach_dir)
             if os.path.isdir(os.path.join(attach_dir, d))
         ]
+        # Prefer the chat-scoped directory, then fall back to same-month attach dirs.
+        search_dirs = [target_hash] + [d for d in all_dirs if d != target_hash] if target_hash else all_dirs
 
         sub_dir_name = "Img" if base_type == 3 else ("Video" if base_type == 43 else "Voice")
 
+        image_sizes = _image_size_hints(content) if base_type == 3 else {}
+        best = None
+        best_score = -1
+
         for d in search_dirs:
             sub = os.path.join(attach_dir, d, date_prefix, sub_dir_name)
-            if os.path.isdir(sub):
-                files = [f for f in os.listdir(sub) if not f.endswith("_h.dat")]
-                if files:
-                    # 返回目录路径（具体是哪个文件无法从 XML 精确匹配）
-                    sample = files[0]
-                    return os.path.join(sub, sample), True
+            if not os.path.isdir(sub):
+                continue
+            for entry in os.scandir(sub):
+                if not entry.is_file():
+                    continue
+                name = entry.name
+                if name.endswith("_h.dat") and base_type == 3 and image_sizes.get("main"):
+                    pass
+                elif name.endswith("_h.dat"):
+                    continue
+                score = _score_image_candidate(entry, image_sizes) if base_type == 3 else 1
+                if score > best_score:
+                    best = entry.path
+                    best_score = score
+        if best and (base_type != 3 or best_score > 0):
+            if base_type == 3:
+                best = _promote_image_variant(best)
+            return best, True
 
         # 视频：也检查 msg/video/
         if base_type == 43:
@@ -309,6 +337,102 @@ def _resolve_media_path(db_dir, content, local_type, create_time_ts, chat_userna
                     return os.path.join(video_dir, thumbs[0]), True
 
     return None, False
+
+
+def _promote_image_variant(path):
+    if not path.lower().endswith("_t.dat"):
+        return path
+    base = path[:-6]
+    candidates = [
+        base + "_h.dat",
+        base + ".dat",
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return path
+
+
+def _thumbnail_image_variant(path):
+    lower = path.lower()
+    if lower.endswith("_t.dat"):
+        return path if os.path.isfile(path) else None
+    if lower.endswith("_h.dat"):
+        thumb = path[:-6] + "_t.dat"
+    elif lower.endswith(".dat"):
+        thumb = path[:-4] + "_t.dat"
+    else:
+        return None
+    return thumb if os.path.isfile(thumb) else None
+
+
+def _image_size_hints(content):
+    root = _parse_xml_root(_extract_xml_content(content))
+    if root is None:
+        return {}
+    img = root.find('.//img')
+    if img is None:
+        return {}
+
+    def attr_int(name):
+        return _parse_int((img.get(name) or '').strip(), 0)
+
+    main = {
+        v for v in (
+            attr_int("length"),
+            attr_int("hevc_mid_size"),
+        )
+        if v > 0
+    }
+    hd = attr_int("hdlength")
+    thumb = attr_int("cdnthumblength")
+    return {
+        "hd": hd,
+        "main": main,
+        "thumb": thumb,
+    }
+
+
+def _score_image_candidate(entry, image_sizes):
+    if not image_sizes:
+        return 0
+    try:
+        size = entry.stat().st_size
+    except OSError:
+        return 0
+    name = entry.name
+    hd_size = image_sizes.get("hd") or 0
+    main_sizes = image_sizes.get("main") or set()
+    thumb_size = image_sizes.get("thumb") or 0
+    if hd_size and size == hd_size and name.endswith("_h.dat"):
+        return 50
+    if hd_size and size == hd_size + _WECHAT_V2_DAT_OVERHEAD and name.endswith("_h.dat"):
+        return 50
+    if hd_size and size == hd_size:
+        return 45
+    if hd_size and size == hd_size + _WECHAT_V2_DAT_OVERHEAD:
+        return 45
+    if size in main_sizes and name.endswith("_h.dat"):
+        return 42
+    if size - _WECHAT_V2_DAT_OVERHEAD in main_sizes and name.endswith("_h.dat"):
+        return 42
+    if thumb_size and size == thumb_size and name.endswith("_t.dat"):
+        return 10
+    if thumb_size and size == thumb_size + _WECHAT_V2_DAT_OVERHEAD and name.endswith("_t.dat"):
+        return 10
+    if size in main_sizes and not name.endswith("_t.dat"):
+        return 40
+    if size - _WECHAT_V2_DAT_OVERHEAD in main_sizes and not name.endswith("_t.dat"):
+        return 40
+    if thumb_size and size == thumb_size:
+        return 5
+    if thumb_size and size == thumb_size + _WECHAT_V2_DAT_OVERHEAD:
+        return 5
+    if size in main_sizes:
+        return 30
+    if size - _WECHAT_V2_DAT_OVERHEAD in main_sizes:
+        return 30
+    return 0
 
 
 def _format_message_text(local_id, local_type, content, is_group, chat_username, chat_display_name, names, display_name_fn, db_dir=None, create_time_ts=0, resolve_media=False):
@@ -327,9 +451,27 @@ def _format_message_text(local_id, local_type, content, is_group, chat_username,
 
     if base_type == 3:
         if media_path:
-            tag = f"[图片] {media_path}"
+            display_path = media_path
+            decrypt_failed = False
+            used_thumbnail = False
+            if media_exists and media_path.lower().endswith(".dat"):
+                decrypted_path, _ = decrypt_wechat_image(media_path)
+                if not decrypted_path:
+                    thumb_path = _thumbnail_image_variant(media_path)
+                    if thumb_path and thumb_path != media_path:
+                        decrypted_path, _ = decrypt_wechat_image(thumb_path)
+                        used_thumbnail = bool(decrypted_path)
+                if decrypted_path:
+                    display_path = decrypted_path
+                else:
+                    decrypt_failed = True
+            tag = f"[图片] {display_path}"
             if not media_exists:
                 tag += " (文件不存在)"
+            elif decrypt_failed:
+                tag += " (无法解密)"
+            elif used_thumbnail:
+                tag += " (缩略图)"
         else:
             tag = f"[图片] (local_id={local_id})"
         text = tag

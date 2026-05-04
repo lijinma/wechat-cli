@@ -224,10 +224,13 @@ wechat-cli history "Alice"                 # Last 50 messages
 wechat-cli history "Alice" --limit 100 --offset 50
 wechat-cli history "Team" --start-time "2026-04-01" --end-time "2026-04-03"
 wechat-cli history "Alice" --type link     # Only links
+wechat-cli history "Team" --type image --media --format text  # Resolve and decrypt local images
 wechat-cli history "Alice" --format text
 ```
 
-**Options:** `--limit`, `--offset`, `--start-time`, `--end-time`, `--type`, `--format`
+**Options:** `--limit`, `--offset`, `--start-time`, `--end-time`, `--type`, `--format`, `--media`
+
+`--media` attempts to resolve local media file paths. On macOS WeChat 4.x, image `.dat` files are decrypted into the system temp directory. If an original image is stored as a `wxgf`/HEVC container, `ffmpeg` must be installed to convert it to a normal JPG. Without `ffmpeg`, regular JPG/PNG images can still be decrypted, but `wxgf` originals may be reported as not decryptable.
 
 ### `search` — Search Messages
 
@@ -350,7 +353,8 @@ WeChat stores chat data in SQLCipher-encrypted SQLite databases locally. WeChat 
 
 1. **Extracts keys** — scans WeChat process memory for encryption keys (`init`)
 2. **Decrypts on-the-fly** — transparent page-level AES-256-CBC decryption with caching
-3. **Queries locally** — all data stays on your machine, no network access
+3. **Resolves media** — locates image caches from message metadata and supports macOS WeChat 4.x image `.dat` decryption
+4. **Queries locally** — all data stays on your machine, no network access
 
 ---
 

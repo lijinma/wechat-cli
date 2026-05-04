@@ -22,7 +22,7 @@ from ..output.formatter import output
 @click.option("--end-time", default="", help="结束时间 YYYY-MM-DD [HH:MM[:SS]]")
 @click.option("--format", "fmt", default="json", type=click.Choice(["json", "text"]), help="输出格式")
 @click.option("--type", "msg_type", default=None, type=click.Choice(MSG_TYPE_NAMES), help="消息类型过滤")
-@click.option("--media", is_flag=True, help="解析媒体文件路径（图片/文件/视频/语音）")
+@click.option("--media", is_flag=True, help="解析媒体文件路径（图片 .dat 会尝试解密到缓存目录）")
 @click.pass_context
 def history(ctx, chat_name, limit, offset, start_time, end_time, fmt, msg_type, media):
     """获取指定聊天的消息记录

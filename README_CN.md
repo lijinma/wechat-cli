@@ -222,10 +222,13 @@ wechat-cli history "张三"                  # 最近 50 条消息
 wechat-cli history "张三" --limit 100 --offset 50
 wechat-cli history "交流群" --start-time "2026-04-01" --end-time "2026-04-03"
 wechat-cli history "张三" --type link      # 只看链接
+wechat-cli history "群聊" --type image --media --format text  # 解析并解密本地图片
 wechat-cli history "张三" --format text
 ```
 
-**选项：** `--limit`、`--offset`、`--start-time`、`--end-time`、`--type`、`--format`
+**选项：** `--limit`、`--offset`、`--start-time`、`--end-time`、`--type`、`--format`、`--media`
+
+`--media` 会尝试解析本地媒体文件路径。macOS 微信 4.x 的图片 `.dat` 会自动解密到系统临时目录；如果原图是 `wxgf`/HEVC 容器，需要系统安装 `ffmpeg` 才能转换为普通 JPG。未安装 `ffmpeg` 时，普通 JPG/PNG 等仍可解密，`wxgf` 原图会回退为无法解密。
 
 ### `search` — 搜索消息
 
@@ -348,7 +351,8 @@ wechat-cli new-messages                    # 后续: 仅返回上次以来的新
 
 1. **提取密钥** — 扫描微信进程内存获取加密密钥（`init`）
 2. **即时解密** — 透明页级 AES-256-CBC 解密，带缓存
-3. **本地查询** — 所有数据留在本机，无需网络访问
+3. **媒体解析** — 按本地缓存和消息元数据定位图片，支持 macOS 微信 4.x 图片 `.dat` 解密
+4. **本地查询** — 所有数据留在本机，无需网络访问
 
 ---
 
