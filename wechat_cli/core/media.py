@@ -456,7 +456,11 @@ def _collect_wxid_candidates(path):
         if not value or value in candidates:
             return
         candidates.append(value)
+        # Try stripping the last _suffix (e.g. wxid_abc123_a0e4 → wxid_abc123)
         if "_" in value:
+            without_last = value.rsplit("_", 1)[0]
+            if without_last and without_last not in candidates:
+                candidates.append(without_last)
             prefix = value.split("_", 1)[0]
             if prefix and prefix not in candidates:
                 candidates.append(prefix)
