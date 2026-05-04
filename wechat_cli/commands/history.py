@@ -1,8 +1,13 @@
 """get-chat-history 命令"""
 
+import hashlib
+import os
+import sys
+
 import click
 
 from ..core.contacts import get_contact_names
+from ..core.media import trigger_wechat_download
 from ..core.messages import (
     MSG_TYPE_FILTERS,
     MSG_TYPE_NAMES,
@@ -23,8 +28,9 @@ from ..output.formatter import output
 @click.option("--format", "fmt", default="json", type=click.Choice(["json", "text"]), help="输出格式")
 @click.option("--type", "msg_type", default=None, type=click.Choice(MSG_TYPE_NAMES), help="消息类型过滤")
 @click.option("--media", is_flag=True, help="解析媒体文件路径（图片 .dat 会尝试解密到缓存目录）")
+@click.option("--download", is_flag=True, help="触发 WeChat 下载原图（需 macOS + WeChat 运行中），与 --media 一起使用")
 @click.pass_context
-def history(ctx, chat_name, limit, offset, start_time, end_time, fmt, msg_type, media):
+def history(ctx, chat_name, limit, offset, start_time, end_time, fmt, msg_type, media, download):
     """获取指定聊天的消息记录
 
     \b
@@ -33,6 +39,7 @@ def history(ctx, chat_name, limit, offset, start_time, end_time, fmt, msg_type, 
       wechat-cli history "张三" --limit 100 --offset 50  # 分页查询
       wechat-cli history "AI交流群" --start-time "2026-04-01" --end-time "2026-04-02"
       wechat-cli history "张三" --format text             # 纯文本输出
+      wechat-cli history "群名" --type image --media --download  # 下载原图后输出
     """
     app = ctx.obj
 
@@ -50,6 +57,29 @@ def history(ctx, chat_name, limit, offset, start_time, end_time, fmt, msg_type, 
     if not chat_ctx['db_path']:
         click.echo(f"找不到 {chat_ctx['display_name']} 的消息记录", err=True)
         ctx.exit(1)
+
+    # --download: open the chat in WeChat to trigger full-size image downloads,
+    # then wait for the files to appear before resolving media paths.
+    if download and media:
+        username = chat_ctx['username']
+        wechat_base = os.path.dirname(app.db_dir)
+        chat_hash = hashlib.md5(username.encode()).hexdigest()
+        attach_dir = os.path.join(wechat_base, "msg", "attach", chat_hash)
+        if os.path.isdir(attach_dir):
+            click.echo(f"正在触发 WeChat 下载原图，最多等待 30 秒…", err=True)
+            # Monitor each YYYY-MM/Img subdirectory for new files.
+            new_files = []
+            for month_dir in sorted(os.listdir(attach_dir), reverse=True)[:3]:
+                img_dir = os.path.join(attach_dir, month_dir, "Img")
+                if os.path.isdir(img_dir):
+                    found = trigger_wechat_download(username, img_dir, timeout=30, chat_name=chat_ctx['display_name'])
+                    new_files.extend(found)
+                    if found:
+                        break
+            if new_files:
+                click.echo(f"下载完成，获取到 {len(new_files)} 个原图文件", err=True)
+            else:
+                click.echo("等待超时，将使用已缓存的缩略图", err=True)
 
     names = get_contact_names(app.cache, app.decrypted_dir)
     type_filter = MSG_TYPE_FILTERS[msg_type] if msg_type else None

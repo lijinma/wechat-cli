@@ -11,7 +11,7 @@ from datetime import datetime
 import zstandard as zstd
 
 from .key_utils import key_path_variants
-from .media import decrypt_wechat_image
+from .media import decrypt_wechat_image, try_cdn_download_image, trigger_wechat_download
 
 _zstd_dctx = zstd.ZstdDecompressor()
 _XML_UNSAFE_RE = re.compile(r'<!DOCTYPE|<!ENTITY', re.IGNORECASE)
@@ -450,28 +450,45 @@ def _format_message_text(local_id, local_type, content, is_group, chat_username,
             pass
 
     if base_type == 3:
-        if media_path:
-            display_path = media_path
-            decrypt_failed = False
-            used_thumbnail = False
-            if media_exists and media_path.lower().endswith(".dat"):
+        display_path = None
+        note = None
+
+        if media_path and media_exists and media_path.lower().endswith(".dat"):
+            is_thumb = media_path.lower().endswith("_t.dat")
+            if is_thumb and resolve_media and content:
+                # Local file is only a thumbnail — try CDN for the original.
+                cdn_path, _ = try_cdn_download_image(content)
+                if cdn_path:
+                    display_path = cdn_path
+
+            if not display_path:
                 decrypted_path, _ = decrypt_wechat_image(media_path)
-                if not decrypted_path:
+                if not decrypted_path and not is_thumb:
                     thumb_path = _thumbnail_image_variant(media_path)
                     if thumb_path and thumb_path != media_path:
                         decrypted_path, _ = decrypt_wechat_image(thumb_path)
-                        used_thumbnail = bool(decrypted_path)
+                        if decrypted_path:
+                            note = "(缩略图)"
                 if decrypted_path:
                     display_path = decrypted_path
+                    if is_thumb and note is None:
+                        note = "(缩略图)"
                 else:
-                    decrypt_failed = True
+                    display_path = media_path
+                    note = "(无法解密)"
+
+        if not display_path and resolve_media and content:
+            # No usable local file — try CDN as primary source.
+            cdn_path, _ = try_cdn_download_image(content)
+            if cdn_path:
+                display_path = cdn_path
+
+        if display_path:
             tag = f"[图片] {display_path}"
-            if not media_exists:
-                tag += " (文件不存在)"
-            elif decrypt_failed:
-                tag += " (无法解密)"
-            elif used_thumbnail:
-                tag += " (缩略图)"
+            if note:
+                tag += f" {note}"
+        elif media_path and not media_exists:
+            tag = f"[图片] (local_id={local_id}, 原图未下载)"
         else:
             tag = f"[图片] (local_id={local_id})"
         text = tag

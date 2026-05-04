@@ -7,6 +7,9 @@ Supported image inputs:
   for the leading segment, and XOR for the tail. The AES/XOR keys are derived
   from the local kvcomm cache and account directory name, following the same
   scheme used by WeFlow.
+- WeChat CDN images: downloaded directly from Tencent CDN when only a
+  thumbnail is available locally. The CDN URL is extracted from the message
+  XML and the image is decrypted with AES-128-CBC (zero IV).
 
 Some V2 images unwrap to WeChat's wxgf HEVC container. If ffmpeg is installed,
 the first HEVC frame is converted to a JPG; otherwise those images cannot be
@@ -15,13 +18,35 @@ converted to a normal image file.
 
 import hashlib
 import os
+import platform
 import re
 import shutil
+import ssl
 import subprocess
 import tempfile
+import time
+import urllib.parse
+import urllib.request
+import urllib.error
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from Crypto.Cipher import AES
+
+
+# WeChat CDN long-connection servers (tried in order; US accounts use uslong* servers).
+_CDN_HOSTS = [
+    "uslong1.wechat.com",
+    "uslong2.wechat.com",
+    "uslong3.wechat.com",
+    "szlong.weixin.qq.com",
+    "bjlong.weixin.qq.com",
+    "shlong.weixin.qq.com",
+    "gzlong.weixin.qq.com",
+    "hklong.weixin.qq.com",
+]
+_CDN_TIMEOUT = 20
+_WECHAT_DOWNLOAD_TIMEOUT = 30  # seconds to wait for WeChat to download images
 
 
 _WECHAT_V2_MAGIC = b"\x07\x08V2\x08\x07"
@@ -479,3 +504,274 @@ def _collect_wxid_candidates(path):
         except OSError:
             pass
     return candidates
+
+
+# ---------------------------------------------------------------------------
+# WeChat CDN image download
+# ---------------------------------------------------------------------------
+
+def _parse_image_xml_attrs(content):
+    """Return the <img> attribute dict from a WeChat image message XML."""
+    if not content:
+        return {}
+    try:
+        idx = content.find("<msg")
+        if idx < 0:
+            return {}
+        root = ET.fromstring(content[idx:])
+        img = root.find(".//img")
+        return dict(img.attrib) if img is not None else {}
+    except ET.ParseError:
+        return {}
+
+
+def _cdn_fetch(cdn_url_bytes):
+    """POST the binary CDN token to WeChat long-connection servers.
+
+    Returns raw (encrypted) response bytes, or None if all hosts fail.
+    The token format is WeChat's proprietary DER/ASN.1-like envelope.
+    """
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "User-Agent": "WeChat/4.1.8.100 CFNetwork/1568.100.1 Darwin/24.3.0",
+    }
+    for host in _CDN_HOSTS:
+        try:
+            req = urllib.request.Request(
+                f"https://{host}/mmtls",
+                data=cdn_url_bytes,
+                method="POST",
+                headers=headers,
+            )
+            with urllib.request.urlopen(req, context=ctx, timeout=_CDN_TIMEOUT) as resp:
+                if resp.status == 200:
+                    data = resp.read()
+                    if data and len(data) > 32:
+                        return data
+        except Exception:
+            continue
+    return None
+
+
+def _cdn_decrypt(data, aes_key_hex):
+    """Decrypt WeChat CDN image data: AES-128-CBC with a zero IV.
+
+    The CDN response is the raw ciphertext; the aeskey from the message XML
+    is the 16-byte key (32 hex chars).  WeChat uses a zero IV.
+    Returns decrypted bytes, or None on any error.
+    """
+    try:
+        key = bytes.fromhex(aes_key_hex)[:16]
+        aligned = len(data) - len(data) % 16
+        if aligned <= 0:
+            return None
+        cipher = AES.new(key, AES.MODE_CBC, b"\x00" * 16)
+        decrypted = cipher.decrypt(data[:aligned])
+        # Strip PKCS#7 padding if present.
+        pad = decrypted[-1]
+        if 0 < pad <= 16 and decrypted[-pad:] == bytes([pad]) * pad:
+            decrypted = decrypted[:-pad]
+        return decrypted
+    except Exception:
+        return None
+
+
+def try_cdn_download_image(content, output_dir=None):
+    """Download a WeChat image directly from CDN, bypassing local cache.
+
+    Parses the CDN URL and AES key from the message XML, attempts to
+    download HD then mid resolution, decrypts, and caches the result.
+
+    Args:
+        content: Decompressed message_content XML string.
+        output_dir: Directory for cached images (defaults to system temp).
+
+    Returns:
+        (path, extension) on success, (None, None) on failure.
+    """
+    attrs = _parse_image_xml_attrs(content)
+    aes_key = attrs.get("aeskey", "")
+    if not aes_key:
+        return None, None
+
+    # Prefer HD (cdnbigimgurl) when hdlength > 0, then mid (cdnmidimgurl).
+    candidates = []
+    hd_url = attrs.get("cdnbigimgurl", "")
+    hd_size = int(attrs.get("hdlength", 0) or 0)
+    if hd_url and hd_size > 0:
+        candidates.append((hd_url, hd_size))
+    mid_url = attrs.get("cdnmidimgurl", "")
+    mid_size = int(attrs.get("hevc_mid_size", 0) or attrs.get("length", 0) or 0)
+    if mid_url:
+        candidates.append((mid_url, mid_size))
+
+    output_dir = output_dir or os.path.join(tempfile.gettempdir(), "wechat_cli_media")
+
+    for cdn_url_hex, _expected_size in candidates:
+        # Check cache.
+        cache_key = hashlib.sha256(
+            (cdn_url_hex + aes_key).encode()
+        ).hexdigest()[:24]
+        for ext in ("jpg", "png", "gif", "webp", "bmp"):
+            cached = os.path.join(output_dir, f"{cache_key}.{ext}")
+            if os.path.exists(cached):
+                return cached, ext
+
+        try:
+            cdn_bytes = bytes.fromhex(cdn_url_hex)
+        except ValueError:
+            continue
+
+        raw = _cdn_fetch(cdn_bytes)
+        if not raw:
+            continue
+
+        decrypted = _cdn_decrypt(raw, aes_key)
+        if not decrypted:
+            continue
+
+        ext = detect_image_extension(decrypted)
+        if not ext:
+            decrypted = _unwrap_wxgf(decrypted)
+            if decrypted:
+                ext = detect_image_extension(decrypted)
+        if not ext or not decrypted:
+            continue
+
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            out_path = os.path.join(output_dir, f"{cache_key}.{ext}")
+            tmp = out_path + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(decrypted)
+            os.replace(tmp, out_path)
+            return out_path, ext
+        except OSError:
+            continue
+
+    return None, None
+
+
+def _trigger_wechat_navigate_applescript(chat_name):
+    """Navigate WeChat to a chat by display name using AppleScript + clipboard.
+
+    Uses CMD+K (WeChat's "Jump to Chat" shortcut) with the chat name pasted
+    from the clipboard to handle non-ASCII characters reliably.
+    """
+    try:
+        subprocess.run(
+            ["pbcopy"],
+            input=chat_name.encode("utf-8"),
+            timeout=3,
+            check=True,
+        )
+    except Exception:
+        return
+
+    # Split into two osascript calls: first activate WeChat, then send keystrokes.
+    # This avoids the -1712 AppleEvent timeout that occurs when WeChat is not
+    # yet frontmost when System Events tries to inject keys.
+    try:
+        subprocess.run(
+            ["osascript", "-e", 'tell application "WeChat" to activate'],
+            timeout=5,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+    time.sleep(1.0)
+
+    script = """\
+tell application "System Events"
+    tell process "WeChat"
+        keystroke "k" using command down
+        delay 0.6
+        keystroke "v" using command down
+        delay 0.8
+        key code 36
+        delay 0.4
+    end tell
+end tell
+"""
+    try:
+        subprocess.run(
+            ["osascript", "-e", script],
+            timeout=12,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def trigger_wechat_download(chat_username, img_dir, timeout=_WECHAT_DOWNLOAD_TIMEOUT, chat_name=None):
+    """Ask the running WeChat app to navigate to a chat, then wait for full-size
+    image files to appear on disk.
+
+    WeChat downloads full-resolution images automatically when it renders a chat
+    view.  We navigate using two methods in parallel: AppleScript search by
+    display name (more reliable for group chats), and the ``weixin://`` URL
+    scheme (works for direct contacts).
+
+    Args:
+        chat_username: The WeChat username/chatroom ID (e.g. ``52233857071@chatroom``).
+        img_dir: The local ``Img/`` directory to monitor for new files.
+        timeout: Maximum seconds to wait (default 30).
+        chat_name: Display name of the chat, used for AppleScript search.
+
+    Returns:
+        List of newly-appeared full-size ``.dat`` file paths, or ``[]`` on
+        failure / timeout.
+    """
+    if platform.system() != "Darwin":
+        return []
+
+    before = _dat_files_snapshot(img_dir)
+
+    # Primary: AppleScript search by display name (handles group chats).
+    if chat_name:
+        _trigger_wechat_navigate_applescript(chat_name)
+
+    # Secondary: URL scheme with percent-encoded username.
+    try:
+        encoded = urllib.parse.quote(chat_username, safe="")
+        url = f"weixin://dl/chat?username={encoded}"
+        subprocess.run(["open", url], timeout=5, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    # Poll for new full-size .dat files (not _t.dat thumbnails).
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(1)
+        after = _dat_files_snapshot(img_dir)
+        new_files = [
+            p for p in (after - before)
+            if not os.path.basename(p).endswith("_t.dat")
+        ]
+        if new_files:
+            time.sleep(1)
+            return new_files
+
+    return []
+
+
+def _dat_files_snapshot(directory):
+    """Return a set of absolute paths for .dat files in *directory*."""
+    try:
+        return {
+            os.path.join(directory, e.name)
+            for e in os.scandir(directory)
+            if e.is_file() and e.name.endswith(".dat")
+        }
+    except OSError:
+        return set()
