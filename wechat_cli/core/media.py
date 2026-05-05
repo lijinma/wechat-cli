@@ -7,9 +7,6 @@ Supported image inputs:
   for the leading segment, and XOR for the tail. The AES/XOR keys are derived
   from the local kvcomm cache and account directory name, following the same
   scheme used by WeFlow.
-- WeChat CDN images: downloaded directly from Tencent CDN when only a
-  thumbnail is available locally. The CDN URL is extracted from the message
-  XML and the image is decrypted with AES-128-CBC (zero IV).
 
 Some V2 images unwrap to WeChat's wxgf HEVC container. If ffmpeg is installed,
 the first HEVC frame is converted to a JPG; otherwise those images cannot be
@@ -20,29 +17,12 @@ import hashlib
 import os
 import re
 import shutil
-import ssl
 import subprocess
 import tempfile
-import urllib.request
-import urllib.error
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from Crypto.Cipher import AES
-
-
-# WeChat CDN long-connection servers (tried in order; US accounts use uslong* servers).
-_CDN_HOSTS = [
-    "uslong1.wechat.com",
-    "uslong2.wechat.com",
-    "uslong3.wechat.com",
-    "szlong.weixin.qq.com",
-    "bjlong.weixin.qq.com",
-    "shlong.weixin.qq.com",
-    "gzlong.weixin.qq.com",
-    "hklong.weixin.qq.com",
-]
-_CDN_TIMEOUT = 20
 
 
 _WECHAT_V2_MAGIC = b"\x07\x08V2\x08\x07"
@@ -500,155 +480,4 @@ def _collect_wxid_candidates(path):
         except OSError:
             pass
     return candidates
-
-
-# ---------------------------------------------------------------------------
-# WeChat CDN image download
-# ---------------------------------------------------------------------------
-
-def _parse_image_xml_attrs(content):
-    """Return the <img> attribute dict from a WeChat image message XML."""
-    if not content:
-        return {}
-    try:
-        idx = content.find("<msg")
-        if idx < 0:
-            return {}
-        root = ET.fromstring(content[idx:])
-        img = root.find(".//img")
-        return dict(img.attrib) if img is not None else {}
-    except ET.ParseError:
-        return {}
-
-
-def _cdn_fetch(cdn_url_bytes):
-    """POST the binary CDN token to WeChat long-connection servers.
-
-    Returns raw (encrypted) response bytes, or None if all hosts fail.
-    The token format is WeChat's proprietary DER/ASN.1-like envelope.
-    """
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-
-    headers = {
-        "Content-Type": "application/octet-stream",
-        "User-Agent": "WeChat/4.1.8.100 CFNetwork/1568.100.1 Darwin/24.3.0",
-    }
-    for host in _CDN_HOSTS:
-        try:
-            req = urllib.request.Request(
-                f"https://{host}/mmtls",
-                data=cdn_url_bytes,
-                method="POST",
-                headers=headers,
-            )
-            with urllib.request.urlopen(req, context=ctx, timeout=_CDN_TIMEOUT) as resp:
-                if resp.status == 200:
-                    data = resp.read()
-                    if data and len(data) > 32:
-                        return data
-        except Exception:
-            continue
-    return None
-
-
-def _cdn_decrypt(data, aes_key_hex):
-    """Decrypt WeChat CDN image data: AES-128-CBC with a zero IV.
-
-    The CDN response is the raw ciphertext; the aeskey from the message XML
-    is the 16-byte key (32 hex chars).  WeChat uses a zero IV.
-    Returns decrypted bytes, or None on any error.
-    """
-    try:
-        key = bytes.fromhex(aes_key_hex)[:16]
-        aligned = len(data) - len(data) % 16
-        if aligned <= 0:
-            return None
-        cipher = AES.new(key, AES.MODE_CBC, b"\x00" * 16)
-        decrypted = cipher.decrypt(data[:aligned])
-        # Strip PKCS#7 padding if present.
-        pad = decrypted[-1]
-        if 0 < pad <= 16 and decrypted[-pad:] == bytes([pad]) * pad:
-            decrypted = decrypted[:-pad]
-        return decrypted
-    except Exception:
-        return None
-
-
-def try_cdn_download_image(content, output_dir=None):
-    """Download a WeChat image directly from CDN, bypassing local cache.
-
-    Parses the CDN URL and AES key from the message XML, attempts to
-    download HD then mid resolution, decrypts, and caches the result.
-
-    Args:
-        content: Decompressed message_content XML string.
-        output_dir: Directory for cached images (defaults to system temp).
-
-    Returns:
-        (path, extension) on success, (None, None) on failure.
-    """
-    attrs = _parse_image_xml_attrs(content)
-    aes_key = attrs.get("aeskey", "")
-    if not aes_key:
-        return None, None
-
-    # Prefer HD (cdnbigimgurl) when hdlength > 0, then mid (cdnmidimgurl).
-    candidates = []
-    hd_url = attrs.get("cdnbigimgurl", "")
-    hd_size = int(attrs.get("hdlength", 0) or 0)
-    if hd_url and hd_size > 0:
-        candidates.append((hd_url, hd_size))
-    mid_url = attrs.get("cdnmidimgurl", "")
-    mid_size = int(attrs.get("hevc_mid_size", 0) or attrs.get("length", 0) or 0)
-    if mid_url:
-        candidates.append((mid_url, mid_size))
-
-    output_dir = output_dir or os.path.join(tempfile.gettempdir(), "wechat_cli_media")
-
-    for cdn_url_hex, _expected_size in candidates:
-        # Check cache.
-        cache_key = hashlib.sha256(
-            (cdn_url_hex + aes_key).encode()
-        ).hexdigest()[:24]
-        for ext in ("jpg", "png", "gif", "webp", "bmp"):
-            cached = os.path.join(output_dir, f"{cache_key}.{ext}")
-            if os.path.exists(cached):
-                return cached, ext
-
-        try:
-            cdn_bytes = bytes.fromhex(cdn_url_hex)
-        except ValueError:
-            continue
-
-        raw = _cdn_fetch(cdn_bytes)
-        if not raw:
-            continue
-
-        decrypted = _cdn_decrypt(raw, aes_key)
-        if not decrypted:
-            continue
-
-        ext = detect_image_extension(decrypted)
-        if not ext:
-            decrypted = _unwrap_wxgf(decrypted)
-            if decrypted:
-                ext = detect_image_extension(decrypted)
-        if not ext or not decrypted:
-            continue
-
-        try:
-            os.makedirs(output_dir, exist_ok=True)
-            out_path = os.path.join(output_dir, f"{cache_key}.{ext}")
-            tmp = out_path + ".tmp"
-            with open(tmp, "wb") as f:
-                f.write(decrypted)
-            os.replace(tmp, out_path)
-            return out_path, ext
-        except OSError:
-            continue
-
-    return None, None
-
 

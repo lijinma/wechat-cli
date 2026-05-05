@@ -237,6 +237,7 @@ def _format_voip_message_text(content):
     return f"[通话] {status_map.get(raw_text, raw_text)}"
 
 
+
 def _resolve_media_path(db_dir, content, local_type, create_time_ts, chat_username=None):
     """尝试解析媒体文件在磁盘上的路径。
 
@@ -285,28 +286,22 @@ def _resolve_media_path(db_dir, content, local_type, create_time_ts, chat_userna
     # 图片消息 (type 3): msg/attach/<hash>/YYYY-MM/Img/*.dat
     # 视频/语音消息: msg/video/YYYY-MM/ 或 msg/attach/
     if base_type in (3, 34, 43):
-        # 搜索 attach 目录下对应月份的文件
         attach_dir = os.path.join(msg_dir, "attach")
         if not os.path.isdir(attach_dir):
             return None, False
 
-        # 尝试用 chat_username 的 MD5 匹配 attach 子目录
         target_hash = None
         if chat_username:
             h = hashlib.md5(chat_username.encode()).hexdigest()
-            candidate = os.path.join(attach_dir, h)
-            if os.path.isdir(candidate):
+            if os.path.isdir(os.path.join(attach_dir, h)):
                 target_hash = h
 
         all_dirs = [
             d for d in os.listdir(attach_dir)
             if os.path.isdir(os.path.join(attach_dir, d))
         ]
-        # Prefer the chat-scoped directory, then fall back to same-month attach dirs.
         search_dirs = [target_hash] + [d for d in all_dirs if d != target_hash] if target_hash else all_dirs
-
         sub_dir_name = "Img" if base_type == 3 else ("Video" if base_type == 43 else "Voice")
-
         image_sizes = _image_size_hints(content) if base_type == 3 else {}
         best = None
         best_score = -1
