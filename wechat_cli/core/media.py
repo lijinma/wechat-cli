@@ -480,4 +480,3 @@ def _collect_wxid_candidates(path):
         except OSError:
             pass
     return candidates
-
