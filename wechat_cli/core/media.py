@@ -18,14 +18,11 @@ converted to a normal image file.
 
 import hashlib
 import os
-import platform
 import re
 import shutil
 import ssl
 import subprocess
 import tempfile
-import time
-import urllib.parse
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
@@ -46,7 +43,6 @@ _CDN_HOSTS = [
     "hklong.weixin.qq.com",
 ]
 _CDN_TIMEOUT = 20
-_WECHAT_DOWNLOAD_TIMEOUT = 30  # seconds to wait for WeChat to download images
 
 
 _WECHAT_V2_MAGIC = b"\x07\x08V2\x08\x07"
@@ -656,122 +652,3 @@ def try_cdn_download_image(content, output_dir=None):
     return None, None
 
 
-def _trigger_wechat_navigate_applescript(chat_name):
-    """Navigate WeChat to a chat by display name using AppleScript + clipboard.
-
-    Uses CMD+K (WeChat's "Jump to Chat" shortcut) with the chat name pasted
-    from the clipboard to handle non-ASCII characters reliably.
-    """
-    try:
-        subprocess.run(
-            ["pbcopy"],
-            input=chat_name.encode("utf-8"),
-            timeout=3,
-            check=True,
-        )
-    except Exception:
-        return
-
-    # Split into two osascript calls: first activate WeChat, then send keystrokes.
-    # This avoids the -1712 AppleEvent timeout that occurs when WeChat is not
-    # yet frontmost when System Events tries to inject keys.
-    try:
-        subprocess.run(
-            ["osascript", "-e", 'tell application "WeChat" to activate'],
-            timeout=5,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-
-    time.sleep(1.0)
-
-    script = """\
-tell application "System Events"
-    tell process "WeChat"
-        keystroke "k" using command down
-        delay 0.6
-        keystroke "v" using command down
-        delay 0.8
-        key code 36
-        delay 0.4
-    end tell
-end tell
-"""
-    try:
-        subprocess.run(
-            ["osascript", "-e", script],
-            timeout=12,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-
-
-def trigger_wechat_download(chat_username, img_dir, timeout=_WECHAT_DOWNLOAD_TIMEOUT, chat_name=None):
-    """Ask the running WeChat app to navigate to a chat, then wait for full-size
-    image files to appear on disk.
-
-    WeChat downloads full-resolution images automatically when it renders a chat
-    view.  We navigate using two methods in parallel: AppleScript search by
-    display name (more reliable for group chats), and the ``weixin://`` URL
-    scheme (works for direct contacts).
-
-    Args:
-        chat_username: The WeChat username/chatroom ID (e.g. ``52233857071@chatroom``).
-        img_dir: The local ``Img/`` directory to monitor for new files.
-        timeout: Maximum seconds to wait (default 30).
-        chat_name: Display name of the chat, used for AppleScript search.
-
-    Returns:
-        List of newly-appeared full-size ``.dat`` file paths, or ``[]`` on
-        failure / timeout.
-    """
-    if platform.system() != "Darwin":
-        return []
-
-    before = _dat_files_snapshot(img_dir)
-
-    # Primary: AppleScript search by display name (handles group chats).
-    if chat_name:
-        _trigger_wechat_navigate_applescript(chat_name)
-
-    # Secondary: URL scheme with percent-encoded username.
-    try:
-        encoded = urllib.parse.quote(chat_username, safe="")
-        url = f"weixin://dl/chat?username={encoded}"
-        subprocess.run(["open", url], timeout=5, check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
-
-    # Poll for new full-size .dat files (not _t.dat thumbnails).
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        time.sleep(1)
-        after = _dat_files_snapshot(img_dir)
-        new_files = [
-            p for p in (after - before)
-            if not os.path.basename(p).endswith("_t.dat")
-        ]
-        if new_files:
-            time.sleep(1)
-            return new_files
-
-    return []
-
-
-def _dat_files_snapshot(directory):
-    """Return a set of absolute paths for .dat files in *directory*."""
-    try:
-        return {
-            os.path.join(directory, e.name)
-            for e in os.scandir(directory)
-            if e.is_file() and e.name.endswith(".dat")
-        }
-    except OSError:
-        return set()

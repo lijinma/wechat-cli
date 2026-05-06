@@ -11,7 +11,7 @@ from datetime import datetime
 import zstandard as zstd
 
 from .key_utils import key_path_variants
-from .media import decrypt_wechat_image, trigger_wechat_download
+from .media import decrypt_wechat_image
 
 _zstd_dctx = zstd.ZstdDecompressor()
 _XML_UNSAFE_RE = re.compile(r'<!DOCTYPE|<!ENTITY', re.IGNORECASE)
