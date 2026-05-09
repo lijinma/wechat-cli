@@ -4,8 +4,6 @@ import sys
 
 import click
 
-from .core.context import AppContext
-
 _VERSION = "0.2.4"
 
 
@@ -28,12 +26,14 @@ def cli(ctx, config_path):
       wechat-cli search "你好" --limit 50           # 全局搜索
       wechat-cli contacts --query "李"              # 搜索联系人
       wechat-cli new-messages                       # 获取增量新消息
+      wechat-cli view-unread                        # 激活 WeChat 并跳转未读会话
     """
-    # init/version 命令不需要 AppContext
-    if ctx.invoked_subcommand in ("init", "version"):
+    # init/version/view-unread 命令不需要 AppContext
+    if ctx.invoked_subcommand in ("init", "version", "view-unread"):
         return
 
     try:
+        from .core.context import AppContext
         ctx.obj = AppContext(config_path)
     except FileNotFoundError as e:
         click.echo(str(e), err=True)
@@ -55,6 +55,7 @@ from .commands.export import export
 from .commands.stats import stats
 from .commands.unread import unread
 from .commands.favorites import favorites
+from .commands.view_unread import view_unread
 
 cli.add_command(init)
 cli.add_command(sessions)
@@ -67,6 +68,7 @@ cli.add_command(export)
 cli.add_command(stats)
 cli.add_command(unread)
 cli.add_command(favorites)
+cli.add_command(view_unread)
 
 
 if __name__ == "__main__":
