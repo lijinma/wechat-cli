@@ -2,7 +2,6 @@
 
 import platform
 import subprocess
-
 import click
 
 
@@ -23,7 +22,7 @@ def _positive_float(ctx, param, value):
 
 
 @click.command("view-unread")
-@click.option("--count", default=10, callback=_positive_int, help="发送“下一条未读”快捷键的次数")
+@click.option("--count", default=15, callback=_positive_int, help="发送“下一条未读”快捷键的次数")
 @click.option("--interval", default=0.2, callback=_positive_float, help="每次快捷键之间的间隔秒数")
 @click.option("--app", "app_path", default=DEFAULT_WECHAT_APP, help="WeChat.app 路径")
 @click.option("--bundle-id", default=DEFAULT_WECHAT_BUNDLE_ID, help="WeChat bundle identifier")
@@ -32,7 +31,7 @@ def view_unread(count, interval, app_path, bundle_id):
 
     \b
     示例:
-      wechat-cli view-unread                  # 激活微信并尝试跳转 10 次未读
+      wechat-cli view-unread                  # 激活微信并尝试跳转 15 次未读
       wechat-cli view-unread --count 20       # 尝试跳转 20 次
       wechat-cli view-unread --interval 0.5   # 每次间隔 0.5 秒
     """
@@ -40,11 +39,9 @@ def view_unread(count, interval, app_path, bundle_id):
         raise click.ClickException("view-unread 目前只支持 macOS")
 
     try:
-        subprocess.run(["caffeinate", "-u", "-t", "100"], check=True)
+        subprocess.Popen(["caffeinate", "-u", "-t", "20"])
     except FileNotFoundError as exc:
         raise click.ClickException("找不到 caffeinate，无法保持屏幕唤醒") from exc
-    except subprocess.CalledProcessError as exc:
-        raise click.ClickException("执行 caffeinate 失败，无法保持屏幕唤醒") from exc
 
     script = [
         "osascript",
