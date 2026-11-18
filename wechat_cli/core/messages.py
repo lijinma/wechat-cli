@@ -434,7 +434,7 @@ def _score_image_candidate(entry, image_sizes):
     return 0
 
 
-def _format_message_text(local_id, local_type, content, is_group, chat_username, chat_display_name, names, display_name_fn, db_dir=None, create_time_ts=0, resolve_media=False):
+def _format_message_text(local_id, local_type, content, is_group, chat_username, chat_display_name, names, display_name_fn, db_dir=None, create_time_ts=0, resolve_media=False, voice_resolver=None):
     sender, text = _parse_message_content(content, local_type, is_group)
     base_type, _ = _split_msg_type(local_type)
 
@@ -478,6 +478,8 @@ def _format_message_text(local_id, local_type, content, is_group, chat_username,
         else:
             tag = f"[图片] (local_id={local_id})"
         text = tag
+    elif base_type == 34 and resolve_media and voice_resolver:
+        text = "[语音] " + voice_resolver(chat_username, local_id, create_time_ts)
     elif base_type == 47:
         text = "[表情]"
     elif base_type == 50:
@@ -655,7 +657,7 @@ def _page_ranked_entries(entries, limit, offset):
 
 # ---- 构建行 ----
 
-def _build_history_line(row, ctx, names, id_to_username, display_name_fn, resolve_media=False, db_dir=None):
+def _build_history_line(row, ctx, names, id_to_username, display_name_fn, resolve_media=False, db_dir=None, voice_resolver=None):
     local_id, local_type, create_time, real_sender_id, content, ct = row
     time_str = datetime.fromtimestamp(create_time).strftime('%Y-%m-%d %H:%M')
     content = decompress_content(content, ct)
@@ -663,7 +665,7 @@ def _build_history_line(row, ctx, names, id_to_username, display_name_fn, resolv
         content = '(无法解压)'
     sender, text = _format_message_text(
         local_id, local_type, content, ctx['is_group'], ctx['username'], ctx['display_name'], names, display_name_fn,
-        db_dir=db_dir, create_time_ts=create_time, resolve_media=resolve_media,
+        db_dir=db_dir, create_time_ts=create_time, resolve_media=resolve_media, voice_resolver=voice_resolver,
     )
     sender_label = _resolve_sender_label(
         real_sender_id, sender, ctx['is_group'], ctx['username'], ctx['display_name'], names, id_to_username, display_name_fn
@@ -697,7 +699,7 @@ def _build_search_entry(row, ctx, names, id_to_username, display_name_fn, resolv
 
 # ---- 聊天记录查询 ----
 
-def collect_chat_history(ctx, names, display_name_fn, start_ts=None, end_ts=None, limit=20, offset=0, msg_type_filter=None, resolve_media=False, db_dir=None):
+def collect_chat_history(ctx, names, display_name_fn, start_ts=None, end_ts=None, limit=20, offset=0, msg_type_filter=None, resolve_media=False, db_dir=None, voice_resolver=None):
     collected = []
     failures = []
     candidate_limit = _candidate_page_size(limit, offset)
@@ -716,7 +718,7 @@ def collect_chat_history(ctx, names, display_name_fn, start_ts=None, end_ts=None
                     fetch_offset += len(rows)
                     for row in rows:
                         try:
-                            collected.append(_build_history_line(row, table_ctx, names, id_to_username, display_name_fn, resolve_media=resolve_media, db_dir=db_dir))
+                            collected.append(_build_history_line(row, table_ctx, names, id_to_username, display_name_fn, resolve_media=resolve_media, db_dir=db_dir, voice_resolver=voice_resolver))
                         except Exception as e:
                             failures.append(f"local_id={row[0]}: {e}")
                         if len(collected) - before >= candidate_limit:

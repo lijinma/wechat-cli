@@ -27,6 +27,7 @@ def cli(ctx, config_path):
       wechat-cli contacts --query "李"              # 搜索联系人
       wechat-cli new-messages                       # 获取增量新消息
       wechat-cli view-unread                        # 激活 WeChat 并跳转未读会话
+      wechat-cli voice "AI交流群" --limit 20          # 导出语音 MP3
     """
     # init/version/view-unread 命令不需要 AppContext
     if ctx.invoked_subcommand in ("init", "version", "view-unread"):
@@ -56,6 +57,7 @@ from .commands.stats import stats
 from .commands.unread import unread
 from .commands.favorites import favorites
 from .commands.view_unread import view_unread
+from .commands.voice import voice
 
 cli.add_command(init)
 cli.add_command(sessions)
@@ -69,6 +71,7 @@ cli.add_command(stats)
 cli.add_command(unread)
 cli.add_command(favorites)
 cli.add_command(view_unread)
+cli.add_command(voice)
 
 
 if __name__ == "__main__":

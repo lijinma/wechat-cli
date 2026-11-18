@@ -13,6 +13,9 @@ dependencies = [
     "zstandard>=0.22,<1",
 ]
 
+[project.optional-dependencies]
+voice = ["pilk>=0.2.4,<0.3"]
+
 [project.scripts]
 wechat-cli = "wechat_cli.main:cli"
 

@@ -42,3 +42,10 @@ Thumbs.db
 # Temp files
 *.tmp
 *.bak
+
+# Local voice exports
+voice-cache/
+*.silk
+*.pcm
+*.mp3
+*.wav

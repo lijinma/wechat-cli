@@ -19,7 +19,7 @@
 ## ✨ 功能亮点
 
 - **🚀 开箱即用** — `npm install -g` 一键安装，无需 Python
-- **📦 11 个命令** — sessions、history、search、contacts、members、stats、export、favorites、unread、new-messages、init
+- **📦 13 个命令** — sessions、history、search、contacts、members、stats、export、favorites、unread、new-messages、init、view-unread、voice
 - **🤖 AI 优先** — 默认 JSON 输出，专为 LLM Agent 工具调用设计
 - **🔒 全程本地** — SQLCipher 即时解密，数据不出本机
 - **📊 丰富统计** — 发言排行、消息类型分布、24 小时活跃图
@@ -382,3 +382,37 @@ wechat-cli new-messages                    # 后续: 仅返回上次以来的新
 ## ⭐ Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=freestylefly/wechat-cli&type=Date)](https://star-history.com/#freestylefly/wechat-cli&Date)
+
+## 语音导出（本机 CLI）
+
+`voice` 从本机 `message/media_*.db` 的 `VoiceInfo` 提取语音，按会话、消息 ID 和时间匹配。群聊与私聊均支持，默认导出浏览器可播放的 MP3；输出 JSON 中有发言人、消息 ID、时长、时间、状态和本机音频路径，不包含媒体 XML、下载令牌或密钥。
+
+```bash
+# 源码安装可选语音依赖；MP3 还需 ffmpeg（macOS 可用 brew install ffmpeg）
+python -m pip install -e '.[voice]'
+
+# 导出最近 50 条语音
+wechat-cli voice '群名' --output-dir ./voice-cache
+
+# 仅在缺少媒体库密钥时，显式复用本机 WeFlow 的现有配置
+wechat-cli voice '群名' --reuse-weflow-key --limit 200
+
+# 导出原始 SILK，不需要 pilk / ffmpeg
+wechat-cli voice '群名' --audio-format silk --limit 20
+
+# 时间范围与分页
+wechat-cli voice '群名' --start-time '2026-11-01' --end-time '2026-11-18' --offset 50 --limit 50
+
+# 现有 history 的 --media 同样支持语音，messages 仍为字符串数组
+wechat-cli history '群名' --type voice --media --format json
+```
+
+未指定 `--output-dir` 时，文件保存在当前配置的密钥目录旁 `voice-cache/`。音频按内容哈希命名，单文件权限为 `600`，默认缓存目录为 `700`。重复导出复用已有文件。`voice` 的结果从旧到新排列，`offset` 从最新语音开始计数；只转换本次选中的语音，不批量转换整段历史。
+
+`status` 为 `ready`、`not_downloaded`、`missing_media_key` 或 `error`。无语音时返回空数组；读取失败或部分语音尚不可用时保留结构化结果并返回非零退出码。消息匹配有歧义时拒绝导出，避免关联到其他会话。只能提取本机保存的语音，不会用相同序号、相似时长或其他会话的文件替代。
+
+WeFlow 的 `decryptKey` 是派生前密钥，不应直接当作数据库 AES 密钥。显式使用 `--reuse-weflow-key` 时，通过现有 `weflow Safe Storage` 钥匙串条目解开本地包装，以媒体库自身 salt 做 PBKDF2-HMAC-SHA512（256000 次），逐库通过 HMAC 验证后，将派生结果原子保存为当前配置目录下的 `media_keys.json`（权限 `600`）。已有有效派生密钥时无需再次读取钥匙串。钥匙串拒绝或校验失败时停止，不重签微信、不重启微信、不使用 sudo，也不修改系统权限。旧的 `all_keys.json` 和 Au12 的配置不变。
+
+普通 `history` / `sessions` 查询无需安装语音依赖，不读取钥匙串，JSON 接口保持兼容。该功能已加入本机 Python 源码 CLI；仓库中的旧 npm 预编译二进制需另行构建发布，不能通过更新源码自动获得此功能。
+
+测试：`python -m unittest discover -s tests -v`。

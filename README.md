@@ -19,7 +19,7 @@ Chat history · Contacts · Sessions · Favorites · Statistics · Export
 ## ✨ Highlights
 
 - **🚀 Zero-config install** — `npm install -g` and you're done, no Python needed
-- **📦 11 commands** — sessions, history, search, contacts, members, stats, export, favorites, unread, new-messages, init
+- **📦 13 commands** — sessions, history, search, contacts, members, stats, export, favorites, unread, new-messages, init, view-unread, voice
 - **🤖 AI-first** — JSON output by default, designed for LLM agent tool calls
 - **🔒 Fully local** — on-the-fly SQLCipher decryption, data never leaves your machine
 - **📊 Rich analytics** — top senders, message type breakdown, 24-hour activity charts
@@ -384,3 +384,21 @@ This project is built on top of [wechat-decrypt](https://github.com/ylytdeng/wec
 ## ⭐ Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=freestylefly/wechat-cli&type=Date)](https://star-history.com/#freestylefly/wechat-cli&Date)
+
+## Local voice export
+
+The Python CLI now includes `voice`. It matches local `VoiceInfo` data across all media shards by conversation, message ID and time, and exports MP3 or original SILK with structured JSON metadata. It does not upload recordings.
+
+```bash
+python -m pip install -e '.[voice]' # optional pilk codec; MP3 also needs ffmpeg
+wechat-cli voice 'Chat name' --output-dir ./voice-cache --limit 50
+wechat-cli voice 'Chat name' --reuse-weflow-key --limit 200
+wechat-cli voice 'Chat name' --audio-format silk
+wechat-cli history 'Chat name' --type voice --media
+```
+
+Use `--start-time`, `--end-time`, `--offset`, and `--limit` to select recordings. Default output is JSON; `--format text` is also available. Audio files use content hashes and mode `600`. Missing recordings and unavailable media keys are reported per message; partial failures return a nonzero exit code. Plain history JSON remains compatible, and text queries need no codec dependency or keychain access.
+
+`--reuse-weflow-key` explicitly opts into reading existing local WeFlow safeStorage through the macOS keychain. The pre-KDF binary secret is derived separately for each media database with PBKDF2-HMAC-SHA512 (256000 rounds); only HMAC-verified keys are saved in a private `media_keys.json` alongside the configured key file. Existing valid media keys avoid another keychain read. This does not re-sign or restart WeChat, invoke sudo, or change security settings.
+
+This updates the locally installed editable Python CLI. Existing npm prebuilt binaries require a separate build/release. See [the Chinese voice guide](README_CN.md#语音导出本机-cli) for status fields and details. Run `python -m unittest discover -s tests -v` for fixture-based tests and an optional real codec round trip.

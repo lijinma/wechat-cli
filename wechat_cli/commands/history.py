@@ -1,6 +1,6 @@
 """get-chat-history 命令"""
 
-import sys
+from contextlib import ExitStack
 
 import click
 
@@ -14,6 +14,7 @@ from ..core.messages import (
     validate_pagination,
 )
 from ..output.formatter import output
+from ..core.voice import VoiceStore
 
 
 @click.command("history")
@@ -24,7 +25,7 @@ from ..output.formatter import output
 @click.option("--end-time", default="", help="结束时间 YYYY-MM-DD [HH:MM[:SS]]")
 @click.option("--format", "fmt", default="json", type=click.Choice(["json", "text"]), help="输出格式")
 @click.option("--type", "msg_type", default=None, type=click.Choice(MSG_TYPE_NAMES), help="消息类型过滤")
-@click.option("--media", is_flag=True, help="解析媒体文件路径（图片 .dat 会尝试解密到缓存目录）")
+@click.option("--media", is_flag=True, help="解析图片及语音文件路径（语音导出 MP3 到本机缓存）")
 @click.pass_context
 def history(ctx, chat_name, limit, offset, start_time, end_time, fmt, msg_type, media):
     """获取指定聊天的消息记录
@@ -36,6 +37,7 @@ def history(ctx, chat_name, limit, offset, start_time, end_time, fmt, msg_type, 
       wechat-cli history "AI交流群" --start-time "2026-04-01" --end-time "2026-04-02"
       wechat-cli history "张三" --format text             # 纯文本输出
       wechat-cli history "群名" --type image --media       # 解析图片并尝试解密
+      wechat-cli history "群名" --type voice --media       # 提取语音为 MP3
     """
     app = ctx.obj
 
@@ -56,11 +58,14 @@ def history(ctx, chat_name, limit, offset, start_time, end_time, fmt, msg_type, 
 
     names = get_contact_names(app.cache, app.decrypted_dir)
     type_filter = MSG_TYPE_FILTERS[msg_type] if msg_type else None
-    lines, failures = collect_chat_history(
-        chat_ctx, names, app.display_name_fn,
-        start_ts=start_ts, end_ts=end_ts, limit=limit, offset=offset,
-        msg_type_filter=type_filter, resolve_media=media, db_dir=app.db_dir,
-    )
+    with ExitStack() as stack:
+        store = stack.enter_context(VoiceStore(app)) if media else None
+        lines, failures = collect_chat_history(
+            chat_ctx, names, app.display_name_fn,
+            start_ts=start_ts, end_ts=end_ts, limit=limit, offset=offset,
+            msg_type_filter=type_filter, resolve_media=media, db_dir=app.db_dir,
+            voice_resolver=store.history_path if store else None,
+        )
 
     if fmt == 'json':
         output({
